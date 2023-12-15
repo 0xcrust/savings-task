@@ -16,7 +16,7 @@ pub fn current_time() -> Result<i64> {
 }
 
 #[program]
-pub mod gfx_task {
+pub mod savings_program {
     use super::*;
 
     //////////////////////////////////////////////////////////////////////////////////////

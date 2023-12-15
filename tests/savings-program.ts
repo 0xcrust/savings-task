@@ -1,12 +1,12 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { GfxTask } from "../target/types/gfx_task";
+import { SavingsProgram } from "../target/types/savings_program";
 
-describe("gfx-task", () => {
+describe("savings-program", () => {
   // Configure the client to use the local cluster.
   anchor.setProvider(anchor.AnchorProvider.env());
 
-  const program = anchor.workspace.GfxTask as Program<GfxTask>;
+  const program = anchor.workspace.GfxTask as Program<SavingsProgram>;
 
   it("Is initialized!", async () => {
     // Add your test here.
