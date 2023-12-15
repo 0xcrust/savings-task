@@ -58,6 +58,7 @@ impl Cli {
     }
 }
 
+/// Fetches all the savings accounts for a particular user and runs the crank on them.
 async fn get_user_accounts(
     user: &Pubkey,
     rpc: &RpcClient,
