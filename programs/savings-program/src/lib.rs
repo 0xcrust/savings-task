@@ -1,12 +1,13 @@
+#![allow(clippy::result_large_err)]
+
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{Mint, Token, TokenAccount, Transfer};
 
-declare_id!("2vcQGZqkPMf5qL96ddFTgXuN9umpgVE7UKLNeaQUWMVU");
+declare_id!("BYDhC79wks4E3P5Fi5Ez4oKwS8fM1PQFVnRQLZsa4YdP");
 
-pub const MANAGER_SEED_PREFIX: &[u8] = b"vault-manager";
+pub const SAVINGS_MANAGER_SEED_PREFIX: &[u8] = b"savings-manager";
 pub const INTEREST_DISTRIBUTOR_SEED_PREFIX: &[u8] = b"interest-distributor";
-pub const INTEREST_VAULT_SEED_PREFIX: &[u8] = b"interest-vault";
 
 pub const INTEREST_PERCENTAGE: u64 = 1;
 pub const SECONDS_IN_MONTHS: i64 = 30 * 24 * 60 * 60;
@@ -36,7 +37,7 @@ pub mod savings_program {
         let distributor = &mut ctx.accounts.interest_distributor;
         distributor.state = ctx.accounts.state.key();
         distributor.mint = ctx.accounts.mint.key();
-        distributor.bump = ctx.bumps.interest_distributor;
+        distributor.bump = *ctx.bumps.get("interest_distributor").unwrap();
 
         Ok(())
     }
@@ -102,7 +103,7 @@ pub mod savings_program {
         manager.mint = ctx.accounts.mint.key();
         manager.distributor = ctx.accounts.interest_distributor.key();
         manager.last_interest_deposit_ts = current_time()?;
-        manager.bump = ctx.bumps.savings_manager;
+        manager.bump = *ctx.bumps.get("savings_manager").unwrap();
         Ok(())
     }
 
@@ -126,7 +127,7 @@ pub mod savings_program {
     // Withdraw tokens from a user's savings vault.
     pub fn user_withdraw(ctx: Context<UserWithdraw>, amount: u64) -> Result<()> {
         let manager_seeds = &[
-            MANAGER_SEED_PREFIX,
+            SAVINGS_MANAGER_SEED_PREFIX,
             ctx.accounts.savings_manager.user.as_ref(),
             ctx.accounts.savings_manager.distributor.as_ref(),
             &[ctx.accounts.savings_manager.bump],
@@ -219,7 +220,7 @@ pub struct UserCreateVault<'info> {
     pub interest_distributor: Account<'info, InterestDistributor>,
     #[account(
         init,
-        seeds = [MANAGER_SEED_PREFIX, user.key().as_ref(), interest_distributor.key().as_ref()],
+        seeds = [SAVINGS_MANAGER_SEED_PREFIX, user.key().as_ref(), interest_distributor.key().as_ref()],
         bump,
         payer = payer,
         space = SavingsManager::SPACE,
@@ -284,7 +285,8 @@ pub struct InitializeState<'info> {
     #[account(
         init,
         payer = initializer,
-        space = State::SPACE
+        space = 8 + 32,
+        //space = State::SPACE
     )]
     pub state: Account<'info, State>,
     pub system_program: Program<'info, System>,
@@ -366,7 +368,7 @@ pub struct DepositInterestToUser<'info> {
     pub user: UncheckedAccount<'info>,
     #[account(
         mut,
-        seeds = [MANAGER_SEED_PREFIX, user.key().as_ref(), interest_distributor.key().as_ref()],
+        seeds = [SAVINGS_MANAGER_SEED_PREFIX, user.key().as_ref(), interest_distributor.key().as_ref()],
         bump,
     )]
     pub user_savings_manager: Account<'info, SavingsManager>,
