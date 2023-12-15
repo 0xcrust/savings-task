@@ -20,17 +20,17 @@ pub mod gfx_task {
     use super::*;
 
     //////////////////////////////////////////////////////////////////////////////////////
-    // ADMIN INSTRUCTIONS
+    // ADMIN INSTRUCTIONS.
     //////////////////////////////////////////////////////////////////////////////////////
 
-    // Initializes a state account. This state will be responsible for distributing interest tokens
+    // Initialize a state account. This state will be responsible for distributing interest tokens
     // to (**ONLY**) user vaults that are registered to it.
     pub fn initialize_state(ctx: Context<InitializeState>, authority: Pubkey) -> Result<()> {
         ctx.accounts.state.authority = authority;
         Ok(())
     }
 
-    // Registers an `interest-distributor` for a mint and creates an accompanying `interest-vault`.
+    // Register an `interest-distributor` for a mint and create an accompanying `interest-vault`.
     // Interest tokens are paid out from the vault permissionlessly at the bequest of the distributor.
     pub fn create_interest_vault(ctx: Context<CreateInterestVaultForMint>) -> Result<()> {
         let distributor = &mut ctx.accounts.interest_distributor;
@@ -41,6 +41,7 @@ pub mod gfx_task {
         Ok(())
     }
 
+    // Top up the amount of tokens in the interest vault.
     pub fn deposit_to_interest_vault(
         ctx: Context<DepositToInterestVault>,
         amount: u64,
@@ -60,6 +61,7 @@ pub mod gfx_task {
         Ok(())
     }
 
+    // Withdraw some amount of tokens from the interest vault.
     pub fn withdraw_from_interest_vault(
         ctx: Context<WithdrawFromInterestVault>,
         amount: u64,
@@ -90,9 +92,10 @@ pub mod gfx_task {
     }
 
     //////////////////////////////////////////////////////////////////////////////////////
-    // USER INSTRUCTIONS
+    // USER INSTRUCTIONS.
     //////////////////////////////////////////////////////////////////////////////////////
 
+    // Create a savings vault for a particular user, registered to an existing interest distributor.
     pub fn user_create_vault(ctx: Context<UserCreateVault>) -> Result<()> {
         let manager = &mut ctx.accounts.savings_manager;
         manager.user = ctx.accounts.user.key();
@@ -103,6 +106,7 @@ pub mod gfx_task {
         Ok(())
     }
 
+    // Deposit tokens to a user's savings vault.
     pub fn user_deposit(ctx: Context<UserDeposit>, amount: u64) -> Result<()> {
         anchor_spl::token::transfer(
             CpiContext::new(
@@ -119,6 +123,7 @@ pub mod gfx_task {
         Ok(())
     }
 
+    // Withdraw tokens from a user's savings vault.
     pub fn user_withdraw(ctx: Context<UserWithdraw>, amount: u64) -> Result<()> {
         let manager_seeds = &[
             MANAGER_SEED_PREFIX,
@@ -144,9 +149,11 @@ pub mod gfx_task {
     }
 
     //////////////////////////////////////////////////////////////////////////////////////
-    // PERMISSIONLESS INSTRUCTIONS
+    // PERMISSIONLESS INSTRUCTIONS.
     //////////////////////////////////////////////////////////////////////////////////////
 
+    // Permissionless instruction, intended to be called by a crank to deposit 1% interest
+    // to a user's savings account every month.
     pub fn deposit_interest(ctx: Context<DepositInterestToUser>) -> Result<()> {
         let current_time = current_time()?;
         let seconds_elapsed = current_time
@@ -164,6 +171,18 @@ pub mod gfx_task {
             .checked_div(100)
             .unwrap();
 
+        if ctx.accounts.interest_vault.amount < interest_amount {
+            return Err(SavingsError::InadequateFunds.into());
+        }
+
+        let state_key = ctx.accounts.interest_distributor.state;
+        let mint_key = ctx.accounts.interest_distributor.mint;
+        let distributor_seeds = [
+            INTEREST_DISTRIBUTOR_SEED_PREFIX,
+            state_key.as_ref(),
+            mint_key.as_ref(),
+            &[ctx.accounts.interest_distributor.bump],
+        ];
         anchor_spl::token::transfer(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
@@ -172,7 +191,8 @@ pub mod gfx_task {
                     to: ctx.accounts.user_savings_vault.to_account_info(),
                     authority: ctx.accounts.interest_distributor.to_account_info(),
                 },
-            ),
+            )
+            .with_signer(&[&distributor_seeds[..]]),
             interest_amount,
         )?;
 
@@ -183,6 +203,10 @@ pub mod gfx_task {
     }
 }
 
+//////////////////////////////////////////
+// CONTEXT FOR USER INSTRUCTIONS:
+/////////////////////////////////////////
+
 #[derive(Accounts)]
 pub struct UserCreateVault<'info> {
     #[account(mut)]
@@ -191,7 +215,7 @@ pub struct UserCreateVault<'info> {
     pub mint: Account<'info, Mint>,
     // This account must exist as a user cannot create a vault account
     // for an unregistered mint.
-    #[account(mut, has_one = mint)]
+    #[account(has_one = mint)]
     pub interest_distributor: Account<'info, InterestDistributor>,
     #[account(
         init,
@@ -250,7 +274,7 @@ pub struct UserWithdraw<'info> {
 }
 
 //////////////////////////////////////////
-// Context for Admin Instructions.
+// CONTEXT FOR ADMIN INSTRUCTIONS:
 /////////////////////////////////////////
 
 #[derive(Accounts)]
@@ -332,6 +356,10 @@ pub struct WithdrawFromInterestVault<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+///////////////////////////////////////////
+// CONTEXT FOR CRANK INSTRUCTION:
+/////////////////////////////////////////
+
 #[derive(Accounts)]
 pub struct DepositInterestToUser<'info> {
     /// CHECK: The user the crank is being called for.
@@ -367,12 +395,12 @@ pub struct State {
 }
 
 impl State {
-    pub const SPACE: usize = 8/*discriminator*/ + 32/*authority*/;
+    pub const SPACE: usize = 8/*anchor account discriminator*/ + 32/*authority*/;
 }
 
 #[account]
-/// This account is unique to a single (state, mint) pair, and is responsible
-/// for the vault from which interest tokens are paid.
+/// This account is a PDA unique to a single (state, mint) pair, and is authority
+/// of the vault from which interest tokens are paid.
 pub struct InterestDistributor {
     /// The state's public key.
     pub state: Pubkey,
@@ -384,14 +412,15 @@ pub struct InterestDistributor {
 }
 
 impl InterestDistributor {
-    pub const SPACE: usize = 8 /*discriminator*/ +
-        32 +    /* state*/
-        32 +    /* mint*/
-        1; /*bump*/
+    pub const SPACE: usize = 8 +   // anchor account discriminator
+        32 +   // state
+        32 +   // mint
+        1; // bump
 }
 
 #[account]
-/// Account holding information for a user-owned vault.
+/// Account holding information for a user-owned vault. This is a PDA unique to a
+/// (user, interest-distributor) pair.
 pub struct SavingsManager {
     /// The owner of the vault.
     pub user: Pubkey,
@@ -407,12 +436,12 @@ pub struct SavingsManager {
 }
 
 impl SavingsManager {
-    pub const SPACE: usize = 8 /*discriminator*/ +
-        32 +    /*user*/
-        32 +    /*mint*/
-        32 +    /*state*/
-        8 +     /*last_interest_deposit_ts*/
-        1; /*bump*/
+    pub const SPACE: usize = 8 +   // anchor account discriminator
+        32 +   // user
+        32 +   // mint
+        32 +   // distributor
+        8 +    // last_interest_deposit_ts
+        1; // bump
 }
 
 #[error_code]
