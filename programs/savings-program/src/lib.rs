@@ -162,6 +162,11 @@ pub mod savings_program {
             .unwrap();
 
         if seconds_elapsed < SECONDS_IN_MONTHS {
+            msg!(
+                "Crank Error: Last deposit timestamp: {}. Current timestamp: {}",
+                ctx.accounts.user_savings_manager.last_interest_deposit_ts,
+                current_time
+            );
             return Err(SavingsError::CrankTurnedTooSoon.into());
         }
 
@@ -344,6 +349,7 @@ pub struct DepositToInterestVault<'info> {
 pub struct WithdrawFromInterestVault<'info> {
     pub authority: Signer<'info>,
     /// CHECK: Checked by SPL-token Transfer Instruction.
+    #[account(mut)]
     pub destination_token_account: UncheckedAccount<'info>,
     #[account(has_one = authority)]
     pub state: Account<'info, State>,
