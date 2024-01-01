@@ -11,7 +11,7 @@ use solana_client::rpc_config::{
 };
 use solana_client::rpc_filter::{Memcmp, RpcFilterType};
 use solana_sdk::commitment_config::CommitmentConfig;
-use solana_sdk::instruction::Instruction;
+use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signer;
 use solana_sdk::signer::EncodableKey;
@@ -36,6 +36,16 @@ pub enum Command {
 
         #[clap(long, short)]
         user_pubkey: Pubkey,
+
+        #[clap(long, short)]
+        program_id: Pubkey,
+    },
+    CrankMultiple {
+        #[clap(long, short)]
+        keypair: String,
+
+        #[clap(long, short)]
+        user_pubkeys: Vec<Pubkey>,
 
         #[clap(long, short)]
         program_id: Pubkey,
@@ -149,6 +159,102 @@ async fn crank(
     Ok(())
 }
 
+async fn crank_multiple(
+    keypair_path: String,
+    user_pubkeys: Vec<Pubkey>,
+    client: &RpcClient,
+    program: &Pubkey,
+) -> Result<()> {
+    use std::collections::hash_map::Entry;
+    use std::collections::HashMap;
+
+    let payer = solana_sdk::signature::Keypair::read_from_file(keypair_path)
+        .map_err(|_| anyhow::anyhow!("failed reading keypair from path"))?;
+
+    // While the `deposit_interest_multiple` instruction now supports transferring to multiple users at a
+    // time, it still relies on all those users sharing the same distributor. Hence, we create unique instructions
+    // for each distributor and every account it can extend.
+
+    // Map of each distributor pubkey, to a tuple of the mint, and a vector containing the account-metas of the users it concerns.
+    let mut map: HashMap<Pubkey, (Pubkey, Vec<AccountMeta>)> = std::collections::HashMap::new();
+
+    for user in user_pubkeys {
+        let accounts = get_user_accounts(&user, client, program).await?;
+        accounts
+            .into_iter()
+            .for_each(|(savings_manager_key, savings_manager)| {
+                let savings_vault =
+                    get_associated_token_address(&savings_manager_key, &savings_manager.mint);
+                let user_account_meta = AccountMeta {
+                    pubkey: user,
+                    is_signer: false,
+                    is_writable: false,
+                };
+                let savings_manager_meta = AccountMeta {
+                    pubkey: savings_manager_key,
+                    is_signer: false,
+                    is_writable: true,
+                };
+                let savings_vault_meta = AccountMeta {
+                    pubkey: savings_vault,
+                    is_signer: false,
+                    is_writable: true,
+                };
+                let extend_with = &[user_account_meta, savings_manager_meta, savings_vault_meta];
+                match map.entry(savings_manager.distributor) {
+                    Entry::Occupied(mut entry) => {
+                        entry.get_mut().1.extend_from_slice(extend_with);
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert((savings_manager.mint, extend_with.into()));
+                    }
+                }
+            });
+    }
+
+    let mut transactions = Vec::with_capacity(map.len());
+
+    for (distributor, (mint, remaining_accounts)) in map {
+        let data = instruction::DepositInterestMultiple {}.data();
+        let accounts = accounts::DepositInterestToMultipleUsers {
+            interest_distributor: distributor,
+            interest_vault: get_associated_token_address(&distributor, &mint),
+            token_program: anchor_spl::token::ID,
+        };
+        let instruction = Instruction {
+            program_id: *program,
+            accounts: [accounts.to_account_metas(None), remaining_accounts].concat(),
+            data,
+        };
+
+        // TODO: Might exceed legacy tx limits of 35 accounts. We should ideally check for this and divide into
+        // multiple transactions if needed.
+        let recent_hash = client.get_latest_blockhash().await?;
+        let transaction = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&payer.pubkey()),
+            &vec![&payer],
+            recent_hash,
+        );
+        transactions.push(transaction);
+    }
+
+    for transaction in transactions {
+        client
+            .send_and_confirm_transaction_with_spinner_and_config(
+                &transaction,
+                CommitmentConfig::confirmed(),
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    ..RpcSendTransactionConfig::default()
+                },
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -159,6 +265,11 @@ async fn main() -> Result<()> {
             user_pubkey,
             program_id,
         } => crank(keypair, user_pubkey, &client, &program_id).await?,
+        Command::CrankMultiple {
+            keypair,
+            user_pubkeys,
+            program_id,
+        } => crank_multiple(keypair, user_pubkeys, &client, &program_id).await?,
     }
 
     Ok(())

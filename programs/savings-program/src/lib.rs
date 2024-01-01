@@ -207,6 +207,104 @@ pub mod savings_program {
 
         Ok(())
     }
+
+    // Similar to `deposit_interest`, but can deposit to multiple users in the same instruction.
+    pub fn deposit_interest_multiple<'info>(
+        ctx: Context<'_, '_, '_, 'info, DepositInterestToMultipleUsers<'info>>,
+    ) -> Result<()> {
+        // This instruction requires that the requisite accounts for each user be passed in trios
+        // from `ctx.remaining_accounts`:
+        // 1. The user's wallet,
+        // 2. The user's savings-manager account, and
+        // 3. The user's savings-vault account.
+
+        let distributor = &mut ctx.accounts.interest_distributor;
+
+        if ctx.remaining_accounts.len() < 3 {
+            return Err(SavingsError::ZeroRecipientsForInterestDeposit.into());
+        }
+
+        for chunk in ctx.remaining_accounts.chunks_exact(3) {
+            let user_wallet = &chunk[0];
+            let unchecked_savings_manager = &chunk[1];
+            let unchecked_savings_vault = &chunk[2];
+
+            // Check that invariants are held for the unvalidated savings-manager account:
+            let (derived_savings_manager, _) = Pubkey::find_program_address(
+                &[
+                    SAVINGS_MANAGER_SEED_PREFIX,
+                    user_wallet.key().as_ref(),
+                    distributor.key().as_ref(),
+                ],
+                &crate::ID,
+            );
+            require_keys_eq!(derived_savings_manager, *unchecked_savings_manager.key);
+            let mut savings_manager =
+                Account::<'info, SavingsManager>::try_from(unchecked_savings_manager)?;
+
+            // Check that invariants are held for the unvalidated savings-vault account.
+            let savings_vault = Account::<'info, TokenAccount>::try_from(&chunk[2])?;
+            let associated_token_address =
+                anchor_spl::associated_token::get_associated_token_address(
+                    &savings_manager.key(),
+                    &savings_manager.mint,
+                );
+            require_keys_eq!(associated_token_address, *unchecked_savings_vault.key);
+            require_keys_eq!(savings_vault.owner, savings_manager.key());
+
+            // Perform the interest transfer.
+            let current_time = current_time()?;
+            let seconds_elapsed = current_time
+                .checked_sub(savings_manager.last_interest_deposit_ts)
+                .unwrap();
+
+            if seconds_elapsed < SECONDS_IN_MONTHS {
+                msg!(
+                    "Crank Error: Last deposit timestamp: {}. Current timestamp: {}",
+                    savings_manager.last_interest_deposit_ts,
+                    current_time
+                );
+                return Err(SavingsError::CrankTurnedTooSoon.into());
+            }
+
+            let interest_amount = INTEREST_PERCENTAGE
+                .checked_mul(savings_vault.amount)
+                .unwrap()
+                .checked_div(100)
+                .unwrap();
+
+            if ctx.accounts.interest_vault.amount < interest_amount {
+                return Err(SavingsError::InadequateFunds.into());
+            }
+
+            let state_key = distributor.state;
+            let mint_key = distributor.mint;
+            let distributor_seeds = [
+                INTEREST_DISTRIBUTOR_SEED_PREFIX,
+                state_key.as_ref(),
+                mint_key.as_ref(),
+                &[distributor.bump],
+            ];
+
+            anchor_spl::token::transfer(
+                CpiContext::new(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.interest_vault.to_account_info(),
+                        to: savings_vault.to_account_info(),
+                        authority: distributor.to_account_info(),
+                    },
+                )
+                .with_signer(&[&distributor_seeds[..]]),
+                interest_amount,
+            )?;
+
+            // Reset the last-interest-deposit-timestamp.
+            savings_manager.last_interest_deposit_ts = current_time;
+        }
+
+        Ok(())
+    }
 }
 
 //////////////////////////////////////////
@@ -394,6 +492,18 @@ pub struct DepositInterestToUser<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+pub struct DepositInterestToMultipleUsers<'info> {
+    pub interest_distributor: Account<'info, InterestDistributor>,
+    #[account(
+        mut,
+        associated_token::mint = interest_distributor.mint,
+        associated_token::authority = interest_distributor,
+    )]
+    pub interest_vault: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+}
+
 #[account]
 /// The Application State.
 pub struct State {
@@ -458,4 +568,6 @@ pub enum SavingsError {
     InadequateFunds,
     #[msg("not enough time has elapsed since the last interest deposit")]
     CrankTurnedTooSoon,
+    #[msg("did not specify any recipient for the interest transfer")]
+    ZeroRecipientsForInterestDeposit,
 }
